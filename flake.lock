@@ -1,0 +1,43 @@
+{
+  "nodes": {
+    "nix-crx": {
+      "locked": {
+        "lastModified": 1774606966,
+        "narHash": "sha256-gZjn7eVv79YWirHn1tyjnZYl+yuonowKYwKzIn49+UI=",
+        "owner": "andreivolt",
+        "repo": "nix-crx",
+        "rev": "61e1c59e941cd73fc849edd38ed36e3b90b76b82",
+        "type": "github"
+      },
+      "original": {
+        "owner": "andreivolt",
+        "repo": "nix-crx",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1778869304,
+        "narHash": "sha256-30sZNZoA1cqF5JNO9fVX+wgiQYjB7HJqqJ4ztCDeBZE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "d233902339c02a9c334e7e593de68855ad26c4cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nix-crx": "nix-crx",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
