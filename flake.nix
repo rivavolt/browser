@@ -3,10 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nix-crx.url = "github:rivavolt/nix-crx";
+    nix-webext.url = "github:rivavolt/nix-webext";
   };
 
-  outputs = { self, nixpkgs, nix-crx }:
+  outputs = { self, nixpkgs, nix-webext }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in {
@@ -16,6 +16,7 @@
 
           manifest = builtins.fromJSON (builtins.readFile ./extension/manifest.json);
           geckoId = manifest.browser_specific_settings.gecko.id;
+          extId = "njgodecjaeinedgjbfbfjhggbapdofeb";
           hostName = "com.browser_ext.host";
 
           # Rust native-messaging host: bridges CLI <-> extension.
@@ -34,8 +35,8 @@
             cargoLock.lockFile = ./cli/Cargo.lock;
           };
 
-          # The WebExtension, plus a wrapped host binary that mirrors its
-          # stderr into the journal for debugging.
+          # The WebExtension, plus a wrapped host binary that mirrors its stderr
+          # into the journal for debugging.
           extension = pkgs.stdenv.mkDerivation {
             pname = "browser-ext-extension";
             version = manifest.version;
@@ -51,34 +52,6 @@
             '';
           };
 
-          # Chrome: pack a signed CRX and an external-extension manifest so
-          # the browser installs it persistently.
-          crxPkg = nix-crx.lib.mkCrxPackage {
-            inherit pkgs extension;
-            key = ./keys/signing.pem;
-            name = "browser-ext";
-            version = manifest.version;
-          };
-
-          extDir = "share/mozilla/extensions/{ec8030f7-c20a-464f-9b0e-13a3a9e97384}";
-
-          # Firefox: zip the extension into an unsigned XPI. sign-extension.sh
-          # in the nixos-config repo signs this via AMO's unlisted channel.
-          firefoxXpi = pkgs.stdenv.mkDerivation {
-            pname = "browser-ext-firefox-xpi";
-            version = manifest.version;
-            dontUnpack = true;
-            nativeBuildInputs = [ pkgs.zip ];
-            buildPhase = ''
-              cd ${extension}/share/chromium-extension
-              zip -r $TMPDIR/extension.xpi .
-            '';
-            installPhase = ''
-              mkdir -p $out/${extDir}
-              cp $TMPDIR/extension.xpi $out/${extDir}/${geckoId}.xpi
-            '';
-          };
-
           # Native-messaging host registrations for both browsers.
           nativeMessaging = pkgs.linkFarm "browser-ext-native-messaging" [
             { name = "etc/chromium/native-messaging-hosts/${hostName}.json";
@@ -87,7 +60,7 @@
                 description = "browser-ext native messaging host";
                 path = "${extension}/bin/browser-ext-host";
                 type = "stdio";
-                allowed_origins = [ "chrome-extension://${crxPkg.extId}/" ];
+                allowed_origins = [ "chrome-extension://${extId}/" ];
               });
             }
             { name = "lib/mozilla/native-messaging-hosts/${hostName}.json";
@@ -100,23 +73,19 @@
               });
             }
           ];
+
+          # Chrome CRX (signed at activation from sops) + Firefox XPI + the
+          # `browser` CLI + native-messaging hosts, all folded into `default`. The
+          # MV3 transform is on (the manifest carries both background forms).
+          ext = nix-webext.lib.mkBrowserExtension {
+            inherit pkgs extension extId geckoId;
+            pname = "browser-ext";
+            version = manifest.version;
+            extraPaths = [ cli nativeMessaging ];
+          };
         in {
           inherit host cli extension;
-
-          # Default output: everything needed to install the extension on
-          # Chrome and Firefox plus the `browser` CLI on PATH.
-          default = pkgs.symlinkJoin {
-            name = "browser-ext";
-            paths = [
-              extension
-              cli
-              crxPkg.package
-              firefoxXpi
-              nativeMessaging
-            ];
-          };
-        }
-      );
+        } // ext);
 
       devShells = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in {
