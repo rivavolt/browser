@@ -13,7 +13,12 @@ browser tabs eval <id> <js>        run JS in a tab, result as JSON
 browser tabs move <id> --index <n> [--window <id>]
                                    reorder a tab, or move it to another window
 browser tabs screenshot <id> [--out <path>]
-                                   capture a tab as a PNG (stdout by default)
+                                   capture the visible viewport as PNG
+browser tabs screenshot <id> --clip X,Y,W,H | --selector <css> | --full-page
+                                   native region / element / full-page capture
+                                   (these use chrome.debugger)
+browser tabs wait <id> [--timeout <secs>]
+                                   wait until a tab finishes loading
 browser tabs close <id>...         close one or more tabs by id
 browser windows list               list all windows     -> JSON array
 browser --plain tabs list          line-oriented output for shells

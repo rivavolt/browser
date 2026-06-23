@@ -85,7 +85,20 @@
           };
         in {
           inherit host cli extension;
-        } // ext);
+        }
+        // ext
+        // {
+          # Surface the bundled `browser` CLI in a consuming nixos-config's agent command catalog: its commands-doc generator lists only home.packages entries carrying passthru.category plus meta.mainProgram/description, none of which nix-webext's default sets.
+          default = ext.default // {
+            meta = (ext.default.meta or { }) // {
+              mainProgram = "browser";
+              description = "Query and control Chrome/Firefox tabs from the CLI";
+            };
+            passthru = (ext.default.passthru or { }) // {
+              category = "Network";
+            };
+          };
+        });
 
       devShells = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in {
