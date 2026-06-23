@@ -170,16 +170,68 @@ const HANDLERS = {
     return { id: tab.id, windowId: tab.windowId, index: tab.index };
   },
 
-  'tabs.screenshot': async ({ id }) => {
+  // Plain `{ id }` captures the visible viewport with captureVisibleTab — no debugger, no infobar — but only the active tab, so it's focused first. Any of clip / selector / fullPage switches to CDP Page.captureScreenshot via chrome.debugger, the only API that clips a region, an element, or the whole page natively (no post-crop), needing neither focus nor page-eval — at the cost of the "is being debugged" infobar while attached.
+  'tabs.screenshot': async ({ id, clip, selector, fullPage }) => {
     const tabId = requireTabId(id);
-    // captureVisibleTab only captures a window's active tab, so make this
-    // tab active and focus its window before capturing.
-    const tab = await chrome.tabs.update(tabId, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-      format: 'png',
+    if (!clip && !selector && !fullPage) {
+      const tab = await chrome.tabs.update(tabId, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      return { id: tab.id, windowId: tab.windowId, dataUrl };
+    }
+    const target = { tabId };
+    await dbgAttach(target);
+    try {
+      const params = { format: 'png', captureBeyondViewport: true };
+      if (selector) {
+        const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
+        const { nodeId } = await dbgSend(target, 'DOM.querySelector', {
+          nodeId: root.nodeId,
+          selector,
+        });
+        if (!nodeId) throw new Error(`selector not found: ${selector}`);
+        const { model } = await dbgSend(target, 'DOM.getBoxModel', { nodeId });
+        const q = model.border;
+        const xs = [q[0], q[2], q[4], q[6]];
+        const ys = [q[1], q[3], q[5], q[7]];
+        const x = Math.min(...xs);
+        const y = Math.min(...ys);
+        params.clip = { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y, scale: 1 };
+      } else if (clip) {
+        params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
+      } else {
+        const m = await dbgSend(target, 'Page.getLayoutMetrics', {});
+        const s = m.cssContentSize || m.contentSize;
+        params.clip = { x: 0, y: 0, width: s.width, height: s.height, scale: 1 };
+      }
+      const { data } = await dbgSend(target, 'Page.captureScreenshot', params);
+      return { id: tabId, dataUrl: `data:image/png;base64,${data}` };
+    } finally {
+      await dbgDetach(target);
+    }
+  },
+
+  'tabs.wait': async ({ id, timeout }) => {
+    const tabId = requireTabId(id);
+    const ms = Number(timeout) > 0 ? Number(timeout) * 1000 : 30000;
+    const current = await chrome.tabs.get(tabId);
+    if (current.status === 'complete') return { id: tabId, status: 'complete' };
+    const status = await new Promise((resolve) => {
+      let settled = false;
+      const done = (s) => {
+        if (settled) return;
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timer);
+        resolve(s);
+      };
+      const listener = (tid, info) => {
+        if (tid === tabId && info.status === 'complete') done('complete');
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+      const timer = setTimeout(() => done('timeout'), ms);
     });
-    return { id: tab.id, windowId: tab.windowId, dataUrl };
+    return { id: tabId, status };
   },
 
   'tabs.eval': async ({ id, code }) => {
@@ -215,6 +267,38 @@ function requireTabId(id) {
     throw new Error(`invalid tab id: ${id}`);
   }
   return n;
+}
+
+// chrome.debugger, promise-wrapped. Used only by tabs.screenshot's native-clip
+// path (CDP Page.captureScreenshot). detach never rejects so it's safe in finally.
+
+function dbgAttach(target) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach(target, '1.3', () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve();
+    });
+  });
+}
+
+function dbgDetach(target) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach(target, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
+}
+
+function dbgSend(target, method, params) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand(target, method, params || {}, (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve(result);
+    });
+  });
 }
 
 // Runs in the page. Returns the visible text of the document, preferring the

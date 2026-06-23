@@ -30,8 +30,12 @@ groups & verbs:
   tabs eval <id> <js>       run JS in a tab, print the result as JSON
   tabs move <id> --index <n> [--window <id>]
                             reorder a tab, or move it to another window
-  tabs screenshot <id> [--out <path>]
-                            capture a tab as a PNG (stdout by default)
+  tabs screenshot <id> [--out <path>] [--clip X,Y,W,H | --selector <css> | --full-page]
+                            capture a tab PNG: visible viewport by default, or a
+                            native region / element / full-page clip (those three
+                            use chrome.debugger)
+  tabs wait <id> [--timeout <secs>]
+                            wait until a tab finishes loading (default 30s)
   tabs close <id>...        close one or more tabs by id
   windows list              list all windows
 
@@ -305,6 +309,7 @@ fn main() {
         }
 
         ("tabs", "screenshot") => {
+            // Plain is the visible viewport; --clip X,Y,W,H, --selector <css>, and --full-page are native CDP captures the host performs through chrome.debugger (no post-processing crop, no focus steal).
             let id = args
                 .first()
                 .unwrap_or_else(|| die("tabs screenshot needs a tab id"));
@@ -312,6 +317,9 @@ fn main() {
                 .parse()
                 .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
             let mut out: Option<String> = None;
+            let mut clip: Option<Value> = None;
+            let mut selector: Option<String> = None;
+            let mut full_page = false;
             let mut it = args[1..].iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
@@ -322,10 +330,43 @@ fn main() {
                                 .clone(),
                         );
                     }
+                    "--selector" => {
+                        selector = Some(
+                            it.next()
+                                .unwrap_or_else(|| die("--selector needs a value"))
+                                .clone(),
+                        );
+                    }
+                    "--full-page" => full_page = true,
+                    "--clip" => {
+                        let v = it.next().unwrap_or_else(|| die("--clip needs X,Y,W,H"));
+                        let n: Vec<f64> = v
+                            .split(',')
+                            .map(|s| {
+                                s.trim()
+                                    .parse()
+                                    .unwrap_or_else(|_| die(format!("invalid --clip value: {v}")))
+                            })
+                            .collect();
+                        if n.len() != 4 {
+                            die("--clip needs four comma-separated numbers: X,Y,W,H");
+                        }
+                        clip = Some(json!({ "x": n[0], "y": n[1], "width": n[2], "height": n[3] }));
+                    }
                     other => die(format!("unknown option for tabs screenshot: {other}")),
                 }
             }
-            let result = request(&browser, "tabs.screenshot", json!({ "id": tab_id }));
+            let mut p = json!({ "id": tab_id });
+            if let Some(c) = clip {
+                p["clip"] = c;
+            }
+            if let Some(s) = selector {
+                p["selector"] = json!(s);
+            }
+            if full_page {
+                p["fullPage"] = json!(true);
+            }
+            let result = request(&browser, "tabs.screenshot", p);
             let data_url = result["dataUrl"]
                 .as_str()
                 .unwrap_or_else(|| die("host returned no screenshot data"));
@@ -335,11 +376,7 @@ fn main() {
                     fs::write(&path, &png)
                         .unwrap_or_else(|e| die(format!("cannot write {path}: {e}")));
                     if !plain {
-                        print_json(&json!({
-                            "id": tab_id,
-                            "path": path,
-                            "bytes": png.len(),
-                        }));
+                        print_json(&json!({ "path": path, "bytes": png.len() }));
                     }
                 }
                 None => {
@@ -347,6 +384,39 @@ fn main() {
                         .write_all(&png)
                         .unwrap_or_else(|e| die(format!("write failed: {e}")));
                 }
+            }
+        }
+
+        ("tabs", "wait") => {
+            let id = args
+                .first()
+                .unwrap_or_else(|| die("tabs wait needs a tab id"));
+            let tab_id: i64 = id
+                .parse()
+                .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
+            let mut timeout: Option<f64> = None;
+            let mut it = args[1..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--timeout" => {
+                        let v = it.next().unwrap_or_else(|| die("--timeout needs seconds"));
+                        timeout = Some(
+                            v.parse()
+                                .unwrap_or_else(|_| die(format!("invalid --timeout: {v}"))),
+                        );
+                    }
+                    other => die(format!("unknown option for tabs wait: {other}")),
+                }
+            }
+            let mut p = json!({ "id": tab_id });
+            if let Some(t) = timeout {
+                p["timeout"] = json!(t);
+            }
+            let result = request(&browser, "tabs.wait", p);
+            if plain {
+                println!("{}", result["status"].as_str().unwrap_or(""));
+            } else {
+                print_json(&result);
             }
         }
 
