@@ -101,13 +101,22 @@ const HANDLERS = {
     }));
   },
 
+  // Reads the page's visible text via CDP Runtime.evaluate rather than
+  // chrome.scripting, so it works on any background tab. Content-script
+  // injection needs a runtime-granted host permission that Chrome withholds
+  // from an externally-installed extension (everything but the active tab
+  // errors "manifest must request permission to access the respective host");
+  // the debugger transport only needs the already-granted debugger permission.
   'tabs.content': async ({ id }) => {
     const tabId = requireTabId(id);
-    const [{ result } = {}] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: extractReadableText,
-    });
-    return { id: tabId, text: result ?? '' };
+    const target = { tabId };
+    await dbgAttach(target);
+    try {
+      const text = await dbgEval(target, `(${extractReadableText})()`);
+      return { id: tabId, text: text ?? '' };
+    } finally {
+      await dbgDetach(target);
+    }
   },
 
   'tabs.close': async ({ ids }) => {
@@ -315,21 +324,31 @@ const HANDLERS = {
     return { id: tabId, status };
   },
 
+  // Evaluates code in the page via CDP Runtime.evaluate instead of
+  // chrome.scripting, for the same reason as tabs.content: scripting injection
+  // is blocked on every non-active tab by withheld host permissions, while the
+  // debugger transport is not. As a bonus this lands on Trusted-Types pages
+  // that reject injected scripts (the case tabs.click was added for). Tried as
+  // an expression first, falling back to statement execution, and any page
+  // promise is awaited.
   'tabs.eval': async ({ id, code }) => {
     const tabId = requireTabId(id);
     if (typeof code !== 'string' || code === '') {
       throw new Error('eval needs code to run');
     }
-    const [injection = {}] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      args: [code],
-      func: evalInPage,
-    });
-    if (injection.error) {
-      throw new Error(injection.error);
+    const target = { tabId };
+    await dbgAttach(target);
+    try {
+      let result;
+      try {
+        result = await dbgEval(target, `(${code})`);
+      } catch (_) {
+        result = await dbgEval(target, code);
+      }
+      return { id: tabId, result: result ?? null };
+    } finally {
+      await dbgDetach(target);
     }
-    return { id: tabId, result: injection.result ?? null };
   },
 
   'windows.list': async () => {
@@ -382,6 +401,27 @@ function dbgSend(target, method, params) {
   });
 }
 
+// Evaluates an expression in the page's main world over CDP and returns the
+// value by structured value. Awaits a returned promise, and surfaces both a
+// thrown page exception and a serialization failure as a rejection so callers
+// (tabs.eval's expression/statement fallback, tabs.content) see a real error.
+async function dbgEval(target, expression) {
+  const { result, exceptionDetails } = await dbgSend(target, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (exceptionDetails) {
+    throw new Error(
+      exceptionDetails.exception?.description ||
+        exceptionDetails.exception?.value ||
+        exceptionDetails.text ||
+        'evaluation failed',
+    );
+  }
+  return result?.value;
+}
+
 // Center point of a node in viewport CSS pixels. Prefers DOM.getContentQuads
 // (the rendered fragment, handling wrapped/transformed boxes) and falls back to
 // the border box of DOM.getBoxModel.
@@ -410,23 +450,6 @@ function extractReadableText() {
   if (!root) return '';
   const text = root.innerText || root.textContent || '';
   return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-// Runs in the page's main world. Evaluates `code` as an expression (falling
-// back to statement execution) and returns it wrapped so the caller can tell
-// a thrown error from a value; the result must survive structured cloning.
-function evalInPage(code) {
-  try {
-    let value;
-    try {
-      value = (0, eval)(`(${code})`);
-    } catch (_) {
-      value = (0, eval)(code);
-    }
-    return { result: value === undefined ? null : value };
-  } catch (e) {
-    return { error: e?.message || String(e) };
-  }
 }
 
 // --- Init ---
