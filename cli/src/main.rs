@@ -27,11 +27,20 @@ groups & verbs:
   tabs open [url]           open a new tab, optionally at a url
   tabs navigate <id> <url>  navigate a tab to a url
   tabs activate <id>        focus a tab and its window
-  tabs eval <id> <js>       run JS in a tab, print the result as JSON
-  tabs click <id> (--selector <css> | --text <substring>)
+  tabs eval <id> <js>       run JS in a tab as a string via CDP Runtime.evaluate
+                            (blocked on Trusted-Types pages; use `tabs js` there)
+  tabs js <id> <code> [--main]
+                            run code as a function body via scripting.executeScript,
+                            print the result as JSON. Works on Trusted-Types pages
+                            (takeout/accounts.google.com) where `tabs eval` cannot,
+                            so it's how you inspect their DOM. Isolated world by
+                            default; --main for page globals. Code may `return` or
+                            be a bare expression.
+  tabs click <id> (--selector <css> [--nth <n>] | --text <sub> [--nth <n>] | --at <x,y>)
                             click an element with a real mouse via chrome.debugger
                             (CDP input events), so it works on Trusted-Types pages
-                            that refuse tabs eval
+                            that refuse tabs eval. --nth picks among repeated
+                            matches (0-based); --at clicks viewport coords.
   tabs move <id> --index <n> [--window <id>]
                             reorder a tab, or move it to another window
   tabs screenshot <id> [--out <path>] [--clip X,Y,W,H | --selector <css> | --full-page]
@@ -270,15 +279,49 @@ fn main() {
             }
         }
 
-        ("tabs", "click") => {
+        ("tabs", "js") => {
             let id = args
                 .first()
-                .unwrap_or_else(|| die("tabs click needs a tab id and --selector or --text"));
+                .unwrap_or_else(|| die("tabs js needs a tab id and code to run"));
+            let tab_id: i64 = id
+                .parse()
+                .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
+            let mut code: Option<String> = None;
+            let mut world = "ISOLATED";
+            for a in &args[1..] {
+                match a.as_str() {
+                    "--main" => world = "MAIN",
+                    s if code.is_none() => code = Some(s.to_string()),
+                    other => die(format!("unknown option for tabs js: {other}")),
+                }
+            }
+            let code = code.unwrap_or_else(|| die("tabs js needs code to run"));
+            let result = request(
+                &browser,
+                "tabs.js",
+                json!({ "id": tab_id, "code": code, "world": world }),
+            );
+            if plain {
+                match &result["result"] {
+                    Value::String(s) => println!("{s}"),
+                    other => println!("{other}"),
+                }
+            } else {
+                print_json(&result);
+            }
+        }
+
+        ("tabs", "click") => {
+            let id = args.first().unwrap_or_else(|| {
+                die("tabs click needs a tab id and --selector, --text, or --at")
+            });
             let tab_id: i64 = id
                 .parse()
                 .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
             let mut selector: Option<String> = None;
             let mut text: Option<String> = None;
+            let mut nth: Option<i64> = None;
+            let mut at: Option<(f64, f64)> = None;
             let mut it = args[1..].iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
@@ -296,11 +339,33 @@ fn main() {
                                 .clone(),
                         );
                     }
+                    "--nth" => {
+                        let v = it.next().unwrap_or_else(|| die("--nth needs a value"));
+                        nth = Some(
+                            v.parse()
+                                .unwrap_or_else(|_| die(format!("invalid --nth: {v}"))),
+                        );
+                    }
+                    "--at" => {
+                        let v = it.next().unwrap_or_else(|| die("--at needs X,Y"));
+                        let n: Vec<f64> = v
+                            .split(',')
+                            .map(|s| {
+                                s.trim()
+                                    .parse()
+                                    .unwrap_or_else(|_| die(format!("invalid --at value: {v}")))
+                            })
+                            .collect();
+                        if n.len() != 2 {
+                            die("--at needs two comma-separated numbers: X,Y");
+                        }
+                        at = Some((n[0], n[1]));
+                    }
                     other => die(format!("unknown option for tabs click: {other}")),
                 }
             }
-            if selector.is_none() && text.is_none() {
-                die("tabs click needs --selector or --text");
+            if selector.is_none() && text.is_none() && at.is_none() {
+                die("tabs click needs --selector, --text, or --at");
             }
             let mut p = json!({ "id": tab_id });
             if let Some(s) = selector {
@@ -308,6 +373,13 @@ fn main() {
             }
             if let Some(t) = text {
                 p["text"] = json!(t);
+            }
+            if let Some(n) = nth {
+                p["nth"] = json!(n);
+            }
+            if let Some((x, y)) = at {
+                p["x"] = json!(x);
+                p["y"] = json!(y);
             }
             let result = request(&browser, "tabs.click", p);
             if plain {

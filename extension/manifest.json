@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "browser-ext",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Query and control browser tabs from the CLI via native messaging",
   "permissions": [
     "nativeMessaging",
     "tabs",
-    "debugger"
+    "debugger",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
