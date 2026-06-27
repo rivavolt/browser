@@ -109,14 +109,10 @@ const HANDLERS = {
   // the debugger transport only needs the already-granted debugger permission.
   'tabs.content': async ({ id }) => {
     const tabId = requireTabId(id);
-    const target = { tabId };
-    await dbgAttach(target);
-    try {
-      const text = await dbgEval(target, `(${extractReadableText})()`);
+    return withDebugger({ tabId }, async () => {
+      const text = await dbgEval({ tabId }, `(${extractReadableText})()`);
       return { id: tabId, text: text ?? '' };
-    } finally {
-      await dbgDetach(target);
-    }
+    });
   },
 
   'tabs.close': async ({ ids }) => {
@@ -189,8 +185,7 @@ const HANDLERS = {
       return { id: tab.id, windowId: tab.windowId, dataUrl };
     }
     const target = { tabId };
-    await dbgAttach(target);
-    try {
+    return withDebugger(target, async () => {
       const params = { format: 'png', captureBeyondViewport: true };
       if (selector) {
         const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
@@ -199,6 +194,7 @@ const HANDLERS = {
           selector,
         });
         if (!nodeId) throw new Error(`selector not found: ${selector}`);
+        await dbgSend(target, 'DOM.scrollIntoViewIfNeeded', { nodeId });
         const { model } = await dbgSend(target, 'DOM.getBoxModel', { nodeId });
         const q = model.border;
         const xs = [q[0], q[2], q[4], q[6]];
@@ -209,64 +205,96 @@ const HANDLERS = {
       } else if (clip) {
         params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
       } else {
-        const m = await dbgSend(target, 'Page.getLayoutMetrics', {});
-        const s = m.cssContentSize || m.contentSize;
-        params.clip = { x: 0, y: 0, width: s.width, height: s.height, scale: 1 };
+        // Full page. A manual clip sized from getLayoutMetrics tiled the
+        // viewport on SPA pages (takeout.google.com) whose document height is
+        // far larger than the painted content; captureBeyondViewport with no
+        // clip is the documented way to get the whole scrollable page and
+        // paints it once, so let Chrome size it.
       }
       const { data } = await dbgSend(target, 'Page.captureScreenshot', params);
       return { id: tabId, dataUrl: `data:image/png;base64,${data}` };
-    } finally {
-      await dbgDetach(target);
-    }
+    });
   },
 
-  // Clicks an element with a real mouse via CDP Input.dispatchMouseEvent, never page-eval, so it works on Trusted-Types pages (accounts.google.com) that refuse Runtime.evaluate and our tabs.eval. Resolves the node through the DOM domain (querySelector for --selector, or the smallest text-matching candidate for --text), scrolls it into view, takes its center from the content quads, and dispatches move → press → release.
-  'tabs.click': async ({ id, selector, text }) => {
+  // Clicks with a real mouse via CDP Input.dispatchMouseEvent, never page-eval,
+  // so it works on Trusted-Types pages (accounts/takeout.google.com) that
+  // refuse Runtime.evaluate and our tabs.eval. Resolves a point three ways:
+  // explicit --at x,y (viewport CSS px, no DOM lookup); a CSS --selector
+  // (--nth picks among matches); or the smallest --text-matching candidate.
+  // For element targets it scrolls into view, then takes the center from the
+  // content quads, and dispatches move → press → release.
+  'tabs.click': async ({ id, selector, text, nth, x: atX, y: atY }) => {
     const tabId = requireTabId(id);
-    if (!selector && !text) {
-      throw new Error('click needs a selector or text');
+    const hasAt = atX !== undefined && atX !== null && atY !== undefined && atY !== null;
+    if (!selector && !text && !hasAt) {
+      throw new Error('click needs a selector, text, or x/y');
     }
     const target = { tabId };
-    await dbgAttach(target);
-    try {
-      await dbgSend(target, 'DOM.enable', {});
-      const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
-      let nodeId;
-      if (selector) {
-        ({ nodeId } = await dbgSend(target, 'DOM.querySelector', {
-          nodeId: root.nodeId,
-          selector,
-        }));
-        if (!nodeId) throw new Error(`selector not found: ${selector}`);
-      } else {
-        const { nodeIds } = await dbgSend(target, 'DOM.querySelectorAll', {
-          nodeId: root.nodeId,
-          selector: 'a,button,div,li,span,[role=button],[role=link]',
-        });
-        const needle = text.toLowerCase();
-        let best = 0;
-        let bestLen = Infinity;
-        for (const candidate of nodeIds || []) {
-          let html;
-          try {
-            ({ outerHTML: html } = await dbgSend(target, 'DOM.getOuterHTML', {
-              nodeId: candidate,
-            }));
-          } catch (_) {
-            continue;
-          }
-          const hay = stripTags(html).toLowerCase();
-          if (hay.includes(needle) && hay.length < bestLen) {
-            best = candidate;
-            bestLen = hay.length;
-          }
+    return withDebugger(target, async () => {
+      let x;
+      let y;
+      let tag = '';
+      let label = '';
+      if (hasAt) {
+        x = Number(atX);
+        y = Number(atY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          throw new Error(`invalid click coordinates: ${atX},${atY}`);
         }
-        if (!best) throw new Error(`no element matching text: ${text}`);
-        nodeId = best;
+      } else {
+        await dbgSend(target, 'DOM.enable', {});
+        const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
+        let nodeId;
+        if (selector) {
+          const { nodeIds } = await dbgSend(target, 'DOM.querySelectorAll', {
+            nodeId: root.nodeId,
+            selector,
+          });
+          const matches = nodeIds || [];
+          if (!matches.length) throw new Error(`selector not found: ${selector}`);
+          const i = Number(nth) || 0;
+          if (i < 0 || i >= matches.length) {
+            throw new Error(`--nth ${i} out of range (${matches.length} matches for ${selector})`);
+          }
+          nodeId = matches[i];
+        } else {
+          const { nodeIds } = await dbgSend(target, 'DOM.querySelectorAll', {
+            nodeId: root.nodeId,
+            selector: 'a,button,div,li,span,[role=button],[role=link]',
+          });
+          const needle = text.toLowerCase();
+          const hits = [];
+          for (const candidate of nodeIds || []) {
+            let html;
+            try {
+              ({ outerHTML: html } = await dbgSend(target, 'DOM.getOuterHTML', {
+                nodeId: candidate,
+              }));
+            } catch (_) {
+              continue;
+            }
+            const hay = stripTags(html).toLowerCase();
+            if (hay.includes(needle)) hits.push({ candidate, len: hay.length });
+          }
+          if (!hits.length) throw new Error(`no element matching text: ${text}`);
+          // Smallest matching element first, then --nth among equally-deep hits
+          // so repeated labels (every "Multiple formats" row) are addressable.
+          hits.sort((a, b) => a.len - b.len);
+          const i = Number(nth) || 0;
+          if (i < 0 || i >= hits.length) {
+            throw new Error(`--nth ${i} out of range (${hits.length} matches for text: ${text})`);
+          }
+          nodeId = hits[i].candidate;
+        }
+        await dbgSend(target, 'DOM.scrollIntoViewIfNeeded', { nodeId });
+        ({ x, y } = await centerOf(target, nodeId));
+        const { node } = await dbgSend(target, 'DOM.describeNode', { nodeId });
+        tag = (node?.localName || node?.nodeName || '').toLowerCase();
+        try {
+          const { outerHTML } = await dbgSend(target, 'DOM.getOuterHTML', { nodeId });
+          label = stripTags(outerHTML).replace(/\s+/g, ' ').trim().slice(0, 200);
+        } catch (_) {}
       }
-      await dbgSend(target, 'DOM.scrollIntoViewIfNeeded', { nodeId });
-      const { x, y } = await centerOf(target, nodeId);
-      const { node } = await dbgSend(target, 'DOM.describeNode', { nodeId });
       await dbgSend(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
       await dbgSend(target, 'Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -284,21 +312,8 @@ const HANDLERS = {
         buttons: 1,
         clickCount: 1,
       });
-      let label = '';
-      try {
-        const { outerHTML } = await dbgSend(target, 'DOM.getOuterHTML', { nodeId });
-        label = stripTags(outerHTML).replace(/\s+/g, ' ').trim().slice(0, 200);
-      } catch (_) {}
-      return {
-        id: tabId,
-        tag: (node?.localName || node?.nodeName || '').toLowerCase(),
-        text: label,
-        x,
-        y,
-      };
-    } finally {
-      await dbgDetach(target);
-    }
+      return { id: tabId, tag, text: label, x, y };
+    });
   },
 
   'tabs.wait': async ({ id, timeout }) => {
@@ -337,8 +352,7 @@ const HANDLERS = {
       throw new Error('eval needs code to run');
     }
     const target = { tabId };
-    await dbgAttach(target);
-    try {
+    return withDebugger(target, async () => {
       let result;
       try {
         result = await dbgEval(target, `(${code})`);
@@ -346,9 +360,56 @@ const HANDLERS = {
         result = await dbgEval(target, code);
       }
       return { id: tabId, result: result ?? null };
-    } finally {
-      await dbgDetach(target);
+    });
+  },
+
+  // Runs code as a FUNCTION body via chrome.scripting.executeScript, not as a
+  // string. This is the one way to inspect Trusted-Types pages (takeout/
+  // accounts.google.com): they reject Runtime.evaluate of a string — which is
+  // all tabs.eval can do — but a compiled, injected function is not a string
+  // assignment so it runs, in the isolated content-script world by default
+  // (world:'MAIN' for page-global access). scripting injection needs the
+  // active-tab host grant Chrome withholds from an externally-installed
+  // extension on background tabs, so the tab is activated first. The body may
+  // `return` a value or be a bare expression (wrapped as `return (expr)` on a
+  // parse error); the result must be JSON-serializable. args is passed through.
+  'tabs.js': async ({ id, code, args, world }) => {
+    const tabId = requireTabId(id);
+    if (typeof code !== 'string' || code === '') {
+      throw new Error('js needs code to run');
     }
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.active) {
+      await chrome.tabs.update(tabId, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+    const callArgs = Array.isArray(args) ? args : [];
+    const w = world === 'MAIN' ? 'MAIN' : 'ISOLATED';
+    const inject = (worldName) =>
+      chrome.scripting.executeScript({
+        target: { tabId },
+        world: worldName,
+        args: [code, callArgs],
+        // Body first; on a syntax error (a bare expression like
+        // `document.title`) retry it wrapped in a return.
+        func: (src, a) => {
+          let fn;
+          try {
+            fn = new Function('args', src);
+          } catch (_) {
+            fn = new Function('args', `return (${src});`);
+          }
+          return fn(a);
+        },
+      });
+    let frames;
+    try {
+      frames = await inject(w);
+    } catch (e) {
+      throw new Error(`scripting.executeScript failed: ${e?.message || e}`);
+    }
+    const top = frames && frames[0];
+    return { id: tabId, world: w, result: top ? top.result ?? null : null };
   },
 
   'windows.list': async () => {
@@ -369,10 +430,9 @@ function requireTabId(id) {
   return n;
 }
 
-// chrome.debugger, promise-wrapped. Used only by tabs.screenshot's native-clip
-// path (CDP Page.captureScreenshot). detach never rejects so it's safe in finally.
+// chrome.debugger, promise-wrapped. detach never rejects so it's safe in finally.
 
-function dbgAttach(target) {
+function dbgAttachOnce(target) {
   return new Promise((resolve, reject) => {
     chrome.debugger.attach(target, '1.3', () => {
       const err = chrome.runtime.lastError;
@@ -380,6 +440,36 @@ function dbgAttach(target) {
       else resolve();
     });
   });
+}
+
+// Attach, recovering from a debugger left over by an aborted op: a request
+// killed mid-flight (broken CLI pipe) or a lost attach race leaves the tab
+// "already attached", after which every later op fails. On that one error we
+// force a detach and retry once. A genuine second attacher (real DevTools open)
+// re-errors and we surface it.
+async function dbgAttach(target) {
+  try {
+    await dbgAttachOnce(target);
+  } catch (e) {
+    if (/already attached/i.test(e.message)) {
+      await dbgDetach(target);
+      await dbgAttachOnce(target);
+    } else {
+      throw e;
+    }
+  }
+}
+
+// Attach, run fn, always detach — even when fn throws. Centralizes the
+// attach/try/finally every debugger-backed handler needs so none can leak an
+// attached debugger on an error path.
+async function withDebugger(target, fn) {
+  await dbgAttach(target);
+  try {
+    return await fn();
+  } finally {
+    await dbgDetach(target);
+  }
 }
 
 function dbgDetach(target) {

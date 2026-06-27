@@ -9,11 +9,21 @@ browser tabs content <id>          readable text of a tab
 browser tabs open [url]            open a new tab, optionally at a url
 browser tabs navigate <id> <url>   navigate a tab to a url
 browser tabs activate <id>         focus a tab and its window
-browser tabs eval <id> <js>        run JS in a tab, result as JSON
-browser tabs click <id> --selector <css> | --text <substring>
+browser tabs eval <id> <js>        run JS as a string (CDP Runtime.evaluate);
+                                   blocked on Trusted-Types pages — use tabs js
+browser tabs js <id> <code> [--main]
+                                   run code as a function body via
+                                   scripting.executeScript, result as JSON. Works
+                                   on Trusted-Types pages (takeout/accounts.
+                                   google.com) where tabs eval can't, so it's how
+                                   you inspect their DOM. Isolated world by
+                                   default; --main for page globals
+browser tabs click <id> --selector <css> [--nth <n>] | --text <substring> [--nth <n>] | --at <x,y>
                                    click an element with a real mouse (CDP input
                                    events via chrome.debugger), so it works on
-                                   Trusted-Types pages that refuse tabs eval
+                                   Trusted-Types pages that refuse tabs eval.
+                                   --nth picks among repeated matches; --at clicks
+                                   viewport coordinates directly
 browser tabs move <id> --index <n> [--window <id>]
                                    reorder a tab, or move it to another window
 browser tabs screenshot <id> [--out <path>]
