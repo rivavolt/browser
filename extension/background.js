@@ -211,6 +211,87 @@ const HANDLERS = {
     }
   },
 
+  // Clicks an element with a real mouse via CDP Input.dispatchMouseEvent, never page-eval, so it works on Trusted-Types pages (accounts.google.com) that refuse Runtime.evaluate and our tabs.eval. Resolves the node through the DOM domain (querySelector for --selector, or the smallest text-matching candidate for --text), scrolls it into view, takes its center from the content quads, and dispatches move → press → release.
+  'tabs.click': async ({ id, selector, text }) => {
+    const tabId = requireTabId(id);
+    if (!selector && !text) {
+      throw new Error('click needs a selector or text');
+    }
+    const target = { tabId };
+    await dbgAttach(target);
+    try {
+      await dbgSend(target, 'DOM.enable', {});
+      const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
+      let nodeId;
+      if (selector) {
+        ({ nodeId } = await dbgSend(target, 'DOM.querySelector', {
+          nodeId: root.nodeId,
+          selector,
+        }));
+        if (!nodeId) throw new Error(`selector not found: ${selector}`);
+      } else {
+        const { nodeIds } = await dbgSend(target, 'DOM.querySelectorAll', {
+          nodeId: root.nodeId,
+          selector: 'a,button,div,li,span,[role=button],[role=link]',
+        });
+        const needle = text.toLowerCase();
+        let best = 0;
+        let bestLen = Infinity;
+        for (const candidate of nodeIds || []) {
+          let html;
+          try {
+            ({ outerHTML: html } = await dbgSend(target, 'DOM.getOuterHTML', {
+              nodeId: candidate,
+            }));
+          } catch (_) {
+            continue;
+          }
+          const hay = stripTags(html).toLowerCase();
+          if (hay.includes(needle) && hay.length < bestLen) {
+            best = candidate;
+            bestLen = hay.length;
+          }
+        }
+        if (!best) throw new Error(`no element matching text: ${text}`);
+        nodeId = best;
+      }
+      await dbgSend(target, 'DOM.scrollIntoViewIfNeeded', { nodeId });
+      const { x, y } = await centerOf(target, nodeId);
+      const { node } = await dbgSend(target, 'DOM.describeNode', { nodeId });
+      await dbgSend(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await dbgSend(target, 'Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x,
+        y,
+        button: 'left',
+        buttons: 1,
+        clickCount: 1,
+      });
+      await dbgSend(target, 'Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x,
+        y,
+        button: 'left',
+        buttons: 1,
+        clickCount: 1,
+      });
+      let label = '';
+      try {
+        const { outerHTML } = await dbgSend(target, 'DOM.getOuterHTML', { nodeId });
+        label = stripTags(outerHTML).replace(/\s+/g, ' ').trim().slice(0, 200);
+      } catch (_) {}
+      return {
+        id: tabId,
+        tag: (node?.localName || node?.nodeName || '').toLowerCase(),
+        text: label,
+        x,
+        y,
+      };
+    } finally {
+      await dbgDetach(target);
+    }
+  },
+
   'tabs.wait': async ({ id, timeout }) => {
     const tabId = requireTabId(id);
     const ms = Number(timeout) > 0 ? Number(timeout) * 1000 : 30000;
@@ -299,6 +380,27 @@ function dbgSend(target, method, params) {
       else resolve(result);
     });
   });
+}
+
+// Center point of a node in viewport CSS pixels. Prefers DOM.getContentQuads
+// (the rendered fragment, handling wrapped/transformed boxes) and falls back to
+// the border box of DOM.getBoxModel.
+async function centerOf(target, nodeId) {
+  try {
+    const { quads } = await dbgSend(target, 'DOM.getContentQuads', { nodeId });
+    if (quads && quads.length) {
+      const q = quads[0];
+      return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4 };
+    }
+  } catch (_) {}
+  const { model } = await dbgSend(target, 'DOM.getBoxModel', { nodeId });
+  const q = model.border;
+  return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4 };
+}
+
+// Crude tag stripper for matching/printing element text without page-eval.
+function stripTags(html) {
+  return (html || '').replace(/<[^>]*>/g, ' ');
 }
 
 // Runs in the page. Returns the visible text of the document, preferring the
