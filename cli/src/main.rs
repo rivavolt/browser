@@ -28,6 +28,10 @@ groups & verbs:
   tabs navigate <id> <url>  navigate a tab to a url
   tabs activate <id>        focus a tab and its window
   tabs eval <id> <js>       run JS in a tab, print the result as JSON
+  tabs click <id> (--selector <css> | --text <substring>)
+                            click an element with a real mouse via chrome.debugger
+                            (CDP input events), so it works on Trusted-Types pages
+                            that refuse tabs eval
   tabs move <id> --index <n> [--window <id>]
                             reorder a tab, or move it to another window
   tabs screenshot <id> [--out <path>] [--clip X,Y,W,H | --selector <css> | --full-page]
@@ -261,6 +265,57 @@ fn main() {
                     Value::String(s) => println!("{s}"),
                     other => println!("{other}"),
                 }
+            } else {
+                print_json(&result);
+            }
+        }
+
+        ("tabs", "click") => {
+            let id = args
+                .first()
+                .unwrap_or_else(|| die("tabs click needs a tab id and --selector or --text"));
+            let tab_id: i64 = id
+                .parse()
+                .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
+            let mut selector: Option<String> = None;
+            let mut text: Option<String> = None;
+            let mut it = args[1..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--selector" => {
+                        selector = Some(
+                            it.next()
+                                .unwrap_or_else(|| die("--selector needs a value"))
+                                .clone(),
+                        );
+                    }
+                    "--text" => {
+                        text = Some(
+                            it.next()
+                                .unwrap_or_else(|| die("--text needs a value"))
+                                .clone(),
+                        );
+                    }
+                    other => die(format!("unknown option for tabs click: {other}")),
+                }
+            }
+            if selector.is_none() && text.is_none() {
+                die("tabs click needs --selector or --text");
+            }
+            let mut p = json!({ "id": tab_id });
+            if let Some(s) = selector {
+                p["selector"] = json!(s);
+            }
+            if let Some(t) = text {
+                p["text"] = json!(t);
+            }
+            let result = request(&browser, "tabs.click", p);
+            if plain {
+                println!(
+                    "{}\t{}",
+                    result["tag"].as_str().unwrap_or(""),
+                    result["text"].as_str().unwrap_or("")
+                );
             } else {
                 print_json(&result);
             }

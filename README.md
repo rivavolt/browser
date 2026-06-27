@@ -10,6 +10,10 @@ browser tabs open [url]            open a new tab, optionally at a url
 browser tabs navigate <id> <url>   navigate a tab to a url
 browser tabs activate <id>         focus a tab and its window
 browser tabs eval <id> <js>        run JS in a tab, result as JSON
+browser tabs click <id> --selector <css> | --text <substring>
+                                   click an element with a real mouse (CDP input
+                                   events via chrome.debugger), so it works on
+                                   Trusted-Types pages that refuse tabs eval
 browser tabs move <id> --index <n> [--window <id>]
                                    reorder a tab, or move it to another window
 browser tabs screenshot <id> [--out <path>]
