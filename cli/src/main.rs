@@ -29,6 +29,10 @@ groups & verbs:
   tabs activate <id>        focus a tab and its window
   tabs eval <id> <js>       run JS in a tab as a string via CDP Runtime.evaluate
                             (blocked on Trusted-Types pages; use `tabs js` there)
+  tabs query <id> (--selector <css> | --text <sub>) [--all]
+                            inspect the DOM via chrome.debugger (works on
+                            Trusted-Types pages, no eval): matching elements'
+                            tag/text/attributes/center-coords
   tabs js <id> <code> [--main]
                             run code as a function body via scripting.executeScript,
                             print the result as JSON. Works on Trusted-Types pages
@@ -388,6 +392,66 @@ fn main() {
                     result["tag"].as_str().unwrap_or(""),
                     result["text"].as_str().unwrap_or("")
                 );
+            } else {
+                print_json(&result);
+            }
+        }
+
+        ("tabs", "query") => {
+            let id = args
+                .first()
+                .unwrap_or_else(|| die("tabs query needs a tab id and --selector or --text"));
+            let tab_id: i64 = id
+                .parse()
+                .unwrap_or_else(|_| die(format!("invalid tab id: {id}")));
+            let mut selector: Option<String> = None;
+            let mut text: Option<String> = None;
+            let mut all = false;
+            let mut it = args[1..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--selector" => {
+                        selector = Some(
+                            it.next()
+                                .unwrap_or_else(|| die("--selector needs a value"))
+                                .clone(),
+                        );
+                    }
+                    "--text" => {
+                        text = Some(
+                            it.next()
+                                .unwrap_or_else(|| die("--text needs a value"))
+                                .clone(),
+                        );
+                    }
+                    "--all" => all = true,
+                    other => die(format!("unknown option for tabs query: {other}")),
+                }
+            }
+            if selector.is_none() && text.is_none() {
+                die("tabs query needs --selector or --text");
+            }
+            let mut p = json!({ "id": tab_id });
+            if let Some(s) = selector {
+                p["selector"] = json!(s);
+            }
+            if let Some(t) = text {
+                p["text"] = json!(t);
+            }
+            if all {
+                p["all"] = json!(true);
+            }
+            let result = request(&browser, "tabs.query", p);
+            if plain {
+                for el in result["elements"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        el["tag"].as_str().unwrap_or(""),
+                        el["x"],
+                        el["y"],
+                        el["text"].as_str().unwrap_or("")
+                    );
+                }
             } else {
                 print_json(&result);
             }

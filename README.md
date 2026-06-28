@@ -11,6 +11,13 @@ browser tabs navigate <id> <url>   navigate a tab to a url
 browser tabs activate <id>         focus a tab and its window
 browser tabs eval <id> <js>        run JS as a string (CDP Runtime.evaluate);
                                    blocked on Trusted-Types pages — use tabs js
+browser tabs query <id> --selector <css> | --text <substring> [--all]
+                                   inspect the DOM over chrome.debugger (DOM
+                                   domain, no eval), so it works on Trusted-
+                                   Types pages without the unsafe-eval tabs js
+                                   needs. Prints each match's tag, text,
+                                   attributes, and viewport-center x,y (feed to
+                                   tabs click --at). First match unless --all
 browser tabs js <id> <code> [--main]
                                    run code as a function body via
                                    scripting.executeScript, result as JSON. Works
