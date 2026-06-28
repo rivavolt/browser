@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "browser-ext",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Query and control browser tabs from the CLI via native messaging",
   "permissions": [
     "nativeMessaging",
@@ -12,19 +12,20 @@
   "host_permissions": [
     "<all_urls>"
   ],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self' 'unsafe-eval'; object-src 'self'"
-  },
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"],
+    "scripts": [
+      "background.js"
+    ],
     "type": "module"
   },
   "browser_specific_settings": {
     "gecko": {
       "id": "browser@andreivolt",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       },
       "strict_min_version": "128.0"
     }
