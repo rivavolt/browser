@@ -412,6 +412,70 @@ const HANDLERS = {
     return { id: tabId, world: w, result: top ? top.result ?? null : null };
   },
 
+  // Queries the DOM over CDP (DOM.querySelector/All + getAttributes/
+  // getOuterHTML/getContentQuads), never page-eval, so it inspects Trusted-Types
+  // pages (takeout/accounts.google.com) that reject Runtime.evaluate and that
+  // tabs js can only reach through unsafe-eval. The same debugger transport
+  // tabs click uses: --selector is a CSS query; --text matches the smallest
+  // element whose stripped text contains the substring (the tabs click matcher).
+  // --all returns every match, else just the first. Each result carries tag,
+  // text, attributes, and the viewport-center x,y you can feed to tabs click --at.
+  'tabs.query': async ({ id, selector, text, all }) => {
+    const tabId = requireTabId(id);
+    if (!selector && !text) {
+      throw new Error('query needs a selector or text');
+    }
+    const target = { tabId };
+    return withDebugger(target, async () => {
+      await dbgSend(target, 'DOM.enable', {});
+      const { root } = await dbgSend(target, 'DOM.getDocument', { depth: 0 });
+      let nodeIds;
+      if (selector) {
+        const r = await dbgSend(target, 'DOM.querySelectorAll', {
+          nodeId: root.nodeId,
+          selector,
+        });
+        nodeIds = r.nodeIds || [];
+      } else {
+        const r = await dbgSend(target, 'DOM.querySelectorAll', {
+          nodeId: root.nodeId,
+          selector: 'a,button,div,li,span,input,[role=button],[role=link]',
+        });
+        const needle = text.toLowerCase();
+        const hits = [];
+        for (const candidate of r.nodeIds || []) {
+          let html;
+          try {
+            ({ outerHTML: html } = await dbgSend(target, 'DOM.getOuterHTML', {
+              nodeId: candidate,
+            }));
+          } catch (_) {
+            continue;
+          }
+          const stripped = stripTags(html);
+          if (stripped.toLowerCase().includes(needle)) {
+            hits.push({ candidate, len: stripped.length });
+          }
+        }
+        // Smallest matching element first, so the substring resolves to the
+        // tightest enclosing node rather than a wrapping container.
+        hits.sort((a, b) => a.len - b.len);
+        nodeIds = hits.map((h) => h.candidate);
+      }
+      if (!nodeIds.length) {
+        throw new Error(
+          selector ? `selector not found: ${selector}` : `no element matching text: ${text}`,
+        );
+      }
+      const wanted = all ? nodeIds : nodeIds.slice(0, 1);
+      const out = [];
+      for (const nodeId of wanted) {
+        out.push(await describeNode(target, nodeId));
+      }
+      return { id: tabId, count: out.length, elements: out };
+    });
+  },
+
   'windows.list': async () => {
     const windows = await chrome.windows.getAll({ populate: true });
     return windows.map((w) => ({
@@ -510,6 +574,38 @@ async function dbgEval(target, expression) {
     );
   }
   return result?.value;
+}
+
+// Snapshots a node for tabs.query: tag, flattened text, attributes as an
+// object, the trimmed outerHTML, and the viewport-center x,y (the same point
+// tabs click would use, feedable to tabs click --at). Coords are null when the
+// node has no box (detached/hidden).
+async function describeNode(target, nodeId) {
+  let tag = '';
+  let text = '';
+  let html = '';
+  const attributes = {};
+  try {
+    const { node } = await dbgSend(target, 'DOM.describeNode', { nodeId });
+    tag = (node?.localName || node?.nodeName || '').toLowerCase();
+  } catch (_) {}
+  try {
+    const { attributes: flat } = await dbgSend(target, 'DOM.getAttributes', { nodeId });
+    for (let i = 0; i + 1 < (flat || []).length; i += 2) {
+      attributes[flat[i]] = flat[i + 1];
+    }
+  } catch (_) {}
+  try {
+    ({ outerHTML: html } = await dbgSend(target, 'DOM.getOuterHTML', { nodeId }));
+    text = stripTags(html).replace(/\s+/g, ' ').trim().slice(0, 300);
+    html = html.replace(/\s+/g, ' ').trim().slice(0, 600);
+  } catch (_) {}
+  let x = null;
+  let y = null;
+  try {
+    ({ x, y } = await centerOf(target, nodeId));
+  } catch (_) {}
+  return { tag, text, attributes, x, y, html };
 }
 
 // Center point of a node in viewport CSS pixels. Prefers DOM.getContentQuads
